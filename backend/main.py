@@ -529,7 +529,7 @@ def run_gitleaks(folder_path: str):
     try:
         result = subprocess.run(
             [
-                r"C:\Users\Lenovo\bin\gitleaks.exe",
+                "gitleaks",
                 "dir",
                 folder_path,
                 "--report-format",
