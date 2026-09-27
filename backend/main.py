@@ -5,7 +5,7 @@ import subprocess
 import json
 import tempfile
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from dotenv import load_dotenv
 from github import Github
 
@@ -145,12 +145,75 @@ def get_pull_request_diff(owner: str, repo: str, pr_number: int):
             detail=str(e)
         )
     
+def process_webhook_security(owner: str, repo: str, pr_number: int):
+
+    try:
+        print(
+            f"Starting security scan for "
+            f"{owner}/{repo} PR #{pr_number}"
+        )
+
+        # Semgrep
+        semgrep_results = scan_github_pr_with_semgrep(
+            owner, repo, pr_number
+        )
+
+        semgrep_findings = normalize_semgrep_results(
+            semgrep_results
+        )
+
+        # Bandit
+        bandit_results = scan_github_pr_with_bandit(
+            owner, repo, pr_number
+        )
+
+        bandit_findings = normalize_bandit_results(
+            bandit_results
+        )
+
+        # Gitleaks
+        gitleaks_results = scan_github_pr_with_gitleaks(
+            owner, repo, pr_number
+        )
+
+        gitleaks_findings = normalize_gitleaks_results(
+            gitleaks_results
+        )
+
+        findings = (
+            semgrep_findings
+            + bandit_findings
+            + gitleaks_findings
+        )
+
+        print(
+            f"Security scan completed for PR #{pr_number}"
+        )
+
+        print(
+            f"Total findings: {len(findings)}"
+        )
+
+        print(
+            json.dumps(findings, indent=2)
+        )
+
+    except Exception as e:
+        print(
+            f"Webhook security scan failed: {str(e)}"
+        )
+
+
 @app.post("/webhook/github")
-async def github_webhook(request: Request):
+async def github_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks):
 
     payload = await request.body()
 
-    signature = request.headers.get("X-Hub-Signature-256")
+    signature = request.headers.get(
+        "X-Hub-Signature-256"
+    )
 
     if not signature:
         raise HTTPException(
@@ -164,15 +227,56 @@ async def github_webhook(request: Request):
         hashlib.sha256
     ).hexdigest()
 
-    if not hmac.compare_digest(signature, expected_signature):
+    if not hmac.compare_digest(
+        signature,
+        expected_signature
+    ):
         raise HTTPException(
             status_code=401,
             detail="Invalid GitHub signature"
         )
 
+    data = json.loads(payload)
+
+    event = request.headers.get(
+        "X-GitHub-Event"
+    )
+
+    # Only process Pull Request events
+    if event != "pull_request":
+        return {
+            "status": "success",
+            "message": f"Webhook received: {event}"
+        }
+
+    action = data.get("action")
+
+    # Scan when PR is opened, updated, or reopened
+    if action not in [
+        "opened",
+        "synchronize",
+        "reopened"
+    ]:
+        return {
+            "status": "success",
+            "message": f"Pull request action ignored: {action}"
+        }
+
+    owner = data["repository"]["owner"]["login"]
+    repo = data["repository"]["name"]
+    pr_number = data["pull_request"]["number"]
+
+    background_tasks.add_task(
+        process_webhook_security,
+        owner,
+        repo,
+        pr_number
+    )
+
     return {
         "status": "success",
-        "message": "Valid GitHub webhook received"
+        "message": "Pull request received. Security scan started.",
+        "pr_number": pr_number
     }
 
 @app.get("/github/pr/{owner}/{repo}/{pr_number}/content")
