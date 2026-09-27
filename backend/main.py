@@ -144,7 +144,98 @@ def get_pull_request_diff(owner: str, repo: str, pr_number: int):
             status_code=500,
             detail=str(e)
         )
-    
+
+def post_pr_security_comment(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    findings: list
+):
+    try:
+        repository = github.get_repo(
+            f"{owner}/{repo}"
+        )
+
+        pull_request = repository.get_pull(
+            pr_number
+        )
+
+        if not findings:
+            comment = """
+## 🛡️ CodeGuardian AI Security Review
+
+✅ **No security issues found.**
+
+Scanned with:
+- Semgrep
+- Bandit
+- Gitleaks
+"""
+
+        else:
+            lines = [
+                "## 🛡️ CodeGuardian AI Security Review",
+                "",
+                f"**Total Findings:** {len(findings)}",
+                ""
+            ]
+
+            for finding in findings:
+                severity = finding.get(
+                    "severity",
+                    "UNKNOWN"
+                )
+
+                tool = finding.get(
+                    "tool",
+                    "Unknown"
+                )
+
+                title = finding.get(
+                    "title",
+                    "Security Issue"
+                )
+
+                file = finding.get(
+                    "file",
+                    "Unknown"
+                )
+
+                line = finding.get(
+                    "line",
+                    "Unknown"
+                )
+
+                message = finding.get(
+                    "message",
+                    "No description available"
+                )
+
+                lines.extend([
+                    f"### {severity} — {title}",
+                    f"**Tool:** {tool}",
+                    f"**File:** `{file}`",
+                    f"**Line:** {line}",
+                    "",
+                    f"**Issue:** {message}",
+                    ""
+                ])
+
+            comment = "\n".join(lines)
+
+        pull_request.create_issue_comment(
+            comment
+        )
+
+        print(
+            f"Security report posted to PR #{pr_number}"
+        )
+
+    except Exception as e:
+        print(
+            f"Failed to post PR comment: {str(e)}"
+        )
+
 def process_webhook_security(owner: str, repo: str, pr_number: int):
 
     try:
@@ -196,6 +287,12 @@ def process_webhook_security(owner: str, repo: str, pr_number: int):
 
         print(
             json.dumps(findings, indent=2)
+        )
+        post_pr_security_comment(
+            owner,
+            repo,
+            pr_number,
+            findings
         )
 
     except Exception as e:
