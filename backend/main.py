@@ -8,7 +8,7 @@ import tempfile
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from dotenv import load_dotenv
 from github import Github
-
+from ai_analyzer import analyze_security_findings
 
 
 load_dotenv()
@@ -22,15 +22,14 @@ app = FastAPI(
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET")
 
+
 if not GITHUB_TOKEN:
     raise RuntimeError("GITHUB_TOKEN is not configured")
 
 if not GITHUB_WEBHOOK_SECRET:
     raise RuntimeError("GITHUB_WEBHOOK_SECRET is not configured")
 
-
 github = Github(GITHUB_TOKEN)
-
 
 @app.get("/")
 def root():
@@ -145,71 +144,37 @@ def get_pull_request_diff(owner: str, repo: str, pr_number: int):
             detail=str(e)
         )
 
+
 def post_pr_security_comment(
     owner: str,
     repo: str,
     pr_number: int,
-    findings: list
+    findings: list,
+    ai_analysis: dict | None = None,
 ):
     try:
-        repository = github.get_repo(
-            f"{owner}/{repo}"
-        )
+        repository = github.get_repo(f"{owner}/{repo}")
+        pull_request = repository.get_pull(pr_number)
 
-        pull_request = repository.get_pull(
-            pr_number
-        )
+        lines = [
+            "## 🛡️ CodeGuardian AI Security Review",
+            "",
+            f"**Total Scanner Findings:** {len(findings)}",
+            "",
+            "Scanned with Semgrep, Bandit, and Gitleaks.",
+            "",
+        ]
 
         if not findings:
-            comment = """
-## 🛡️ CodeGuardian AI Security Review
-
-✅ **No security issues found.**
-
-Scanned with:
-- Semgrep
-- Bandit
-- Gitleaks
-"""
-
+            lines.append("✅ No security findings were reported by the scanners.")
         else:
-            lines = [
-                "## 🛡️ CodeGuardian AI Security Review",
-                "",
-                f"**Total Findings:** {len(findings)}",
-                ""
-            ]
-
             for finding in findings:
-                severity = finding.get(
-                    "severity",
-                    "UNKNOWN"
-                )
-
-                tool = finding.get(
-                    "tool",
-                    "Unknown"
-                )
-
-                title = finding.get(
-                    "title",
-                    "Security Issue"
-                )
-
-                file = finding.get(
-                    "file",
-                    "Unknown"
-                )
-
-                line = finding.get(
-                    "line",
-                    "Unknown"
-                )
-
-                message = finding.get(
-                    "message",
-                    "No description available"
-                )
+                severity = finding.get("severity", "UNKNOWN")
+                tool = finding.get("tool", "Unknown")
+                title = finding.get("title", "Security Issue")
+                file = finding.get("file", "Unknown")
+                line = finding.get("line", "Unknown")
+                message = finding.get("message", "No description available")
 
                 lines.extend([
                     f"### {severity} — {title}",
@@ -217,89 +182,131 @@ Scanned with:
                     f"**File:** `{file}`",
                     f"**Line:** {line}",
                     "",
-                    f"**Issue:** {message}",
-                    ""
+                    f"**Scanner evidence:** {message}",
+                    "",
                 ])
 
-            comment = "\n".join(lines)
+        lines.extend([
+            "---",
+            "",
+            "## 🤖 Groq AI Analysis",
+            "",
+        ])
 
-        pull_request.create_issue_comment(
-            comment
-        )
+        if ai_analysis and ai_analysis.get("status") == "success":
+            lines.extend([
+                "**AI Summary:**",
+                str(ai_analysis.get("summary", "No summary provided.")),
+                "",
+            ])
 
-        print(
-            f"Security report posted to PR #{pr_number}"
-        )
+            ai_findings = ai_analysis.get("findings", [])
+
+            if ai_findings:
+                lines.append("### AI Explanations and Recommendations")
+
+                for item in ai_findings:
+                    if not isinstance(item, dict):
+                        continue
+
+                    lines.extend([
+                        "",
+                        f"#### {item.get('severity', 'Unknown')} — "
+                        f"{item.get('title', 'Security Finding')}",
+                        "",
+                        f"**Explanation:** {item.get('explanation', 'Not provided.')}",
+                        "",
+                        f"**Potential Impact:** {item.get('impact', 'Not provided.')}",
+                        "",
+                        f"**Recommended Fix:** {item.get('recommended_fix', 'Not provided.')}",
+                        "",
+                        f"**AI Confidence:** {item.get('confidence', 'Unknown')}",
+                    ])
+        else:
+            lines.extend([
+                "AI analysis was unavailable for this scan.",
+                "The scanner findings above are preserved.",
+            ])
+
+        lines.extend([
+            "",
+            "---",
+            "_AI recommendations are advisory. Verify findings and fixes before merging._",
+        ])
+
+        pull_request.create_issue_comment("\n".join(lines))
+
+        print(f"Security report posted to PR #{pr_number}")
 
     except Exception as e:
-        print(
-            f"Failed to post PR comment: {str(e)}"
-        )
+        print(f"Failed to post PR comment: {str(e)}")
 
 def process_webhook_security(owner: str, repo: str, pr_number: int):
-
     try:
         print(
             f"Starting security scan for "
             f"{owner}/{repo} PR #{pr_number}"
         )
 
-        # Semgrep
+        # Step 1: Semgrep scan
         semgrep_results = scan_github_pr_with_semgrep(
             owner, repo, pr_number
         )
-
         semgrep_findings = normalize_semgrep_results(
             semgrep_results
         )
 
-        # Bandit
+        # Step 2: Bandit scan
         bandit_results = scan_github_pr_with_bandit(
             owner, repo, pr_number
         )
-
         bandit_findings = normalize_bandit_results(
             bandit_results
         )
 
-        # Gitleaks
+        # Step 3: Gitleaks scan
         gitleaks_results = scan_github_pr_with_gitleaks(
             owner, repo, pr_number
         )
-
         gitleaks_findings = normalize_gitleaks_results(
             gitleaks_results
         )
 
+        # Preserve all original scanner findings
         findings = (
             semgrep_findings
             + bandit_findings
             + gitleaks_findings
         )
 
-        print(
-            f"Security scan completed for PR #{pr_number}"
-        )
+        print(f"Security scans completed for PR #{pr_number}")
+        print(f"Total scanner findings: {len(findings)}")
+        print(json.dumps(findings, indent=2))
+
+        # Step 4: Analyze scanner findings with Groq
+        print("Starting Groq AI analysis...")
+
+        ai_analysis = analyze_security_findings(findings)
 
         print(
-            f"Total findings: {len(findings)}"
+            "Groq AI analysis status: "
+            f"{ai_analysis.get('status', 'unknown')}"
         )
 
-        print(
-            json.dumps(findings, indent=2)
-        )
+        # Step 5: Post scanner findings and AI analysis
         post_pr_security_comment(
             owner,
             repo,
             pr_number,
-            findings
+            findings,
+            ai_analysis,
         )
 
     except Exception as e:
         print(
-            f"Webhook security scan failed: {str(e)}"
+            f"Webhook security scan failed: "
+            f"{type(e).__name__}: {e}"
         )
-
 
 @app.post("/webhook/github")
 async def github_webhook(
@@ -571,7 +578,6 @@ def scan_github_pr_with_bandit(owner: str, repo: str, pr_number: int):
 
         return run_bandit(temp_dir)
 
-
     
 def normalize_semgrep_results(semgrep_data):
 
@@ -761,8 +767,6 @@ def run_gitleaks(folder_path: str):
             f"Gitleaks scan failed: {str(e)}"
         )
 
-
-
 @app.get("/security/bandit-test")
 def bandit_test():
 
@@ -782,6 +786,7 @@ def bandit_test():
             status_code=500,
             detail=str(e)
         )
+
 @app.get("/github/pr/{owner}/{repo}/{pr_number}/bandit")
 def scan_pr_bandit(owner: str, repo: str, pr_number: int):
 
@@ -808,6 +813,7 @@ def scan_pr_bandit(owner: str, repo: str, pr_number: int):
             status_code=500,
             detail=str(e)
         )
+
 def scan_github_pr_with_gitleaks(owner: str, repo: str, pr_number: int):
     repository = github.get_repo(f"{owner}/{repo}")
     pull_request = repository.get_pull(pr_number)
@@ -891,4 +897,4 @@ def scan_pr_security(owner: str, repo: str, pr_number: int):
         raise HTTPException(
             status_code=500,
             detail=str(e)
-        )
+        ) 
